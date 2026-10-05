@@ -17,8 +17,8 @@ from `gateway.core.database` rather than importing `sqlalchemy`. Review new and 
 against the rules below, and do not accept "the module next to it does the
 same" as a reason.
 
-`SERVICE_DATABASE_IMPORT_BASELINE`, `ROUTE_DATABASE_IMPORT_BASELINE` and `FLAT_MODULE_BASELINE` in
-`scripts/check_architecture.py` name the code still in the old shape.
+`SERVICE_DATABASE_IMPORT_BASELINE`, `ROUTE_DATABASE_IMPORT_BASELINE`, `FLAT_MODULE_BASELINE` and
+`REPOSITORY_IMPORT_BASELINE` in `scripts/check_architecture.py` name the code still in the old shape.
 
 - Do not flag an existing baseline entry the PR does not touch.
 - Flag a PR that adds a name to any baseline.
@@ -76,7 +76,8 @@ same" as a reason.
   `gateway.services.<domain>`. Flag an import of a module whose name starts
   with `_` from outside its package.
 - Only the domain's own service package and `api/deps.py` import
-  `gateway.repositories.<domain>`.
+  `gateway.repositories.<domain>`. The check refuses any other import of
+  one, except a module and domain pair on `REPOSITORY_IMPORT_BASELINE`.
 - Flag an import that makes two domain services depend on each other in a
   cycle. A domain that must react to a change in a domain that does not depend
   on it receives a listener interface by constructor injection, defined by the
@@ -84,8 +85,8 @@ same" as a reason.
 - Flag a listener implementation that commits or rolls back. The caller owns
   the transaction.
 
-The boundary check does not enforce these import rules yet, so review is the
-only gate for them.
+The boundary check does not enforce the package root and cycle rules yet, so
+review is the only gate for them.
 
 ## Errors
 

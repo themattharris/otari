@@ -996,3 +996,151 @@ def test_main_fails_on_a_package_named_for_no_domain(tmp_path: Path, monkeypatch
     assert check.main() == 0
     _write(tmp_path, "src/gateway/services/billing/__init__.py", "")
     assert check.main() == 1
+
+
+_REPOSITORY_REMEDY = (
+    "only the domain's own service package and the builders in gateway/api/deps.py import its repositories"
+)
+
+
+def _write_things_repositories(src_root: Path) -> None:
+    _write(src_root, "gateway/repositories/things/__init__.py", "")
+    _write(src_root, "gateway/repositories/things/thing_repository.py", "")
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "source", "module"),
+    [
+        (
+            "gateway/services/widgets/_store.py",
+            "from gateway.repositories.things import ThingRepository\n",
+            "gateway.repositories.things",
+        ),
+        (
+            "gateway/services/widgets/_store.py",
+            "from ...repositories.things.thing_repository import ThingRepository\n",
+            "gateway.repositories.things",
+        ),
+        (
+            "gateway/repositories/widgets/widget_repository.py",
+            "import gateway.repositories.things\n",
+            "gateway.repositories.things",
+        ),
+        ("gateway/api/routes/things.py", "from gateway.repositories import things\n", "gateway.repositories.things"),
+        (
+            "gateway/adapters/thing_adapter.py",
+            "from gateway.repositories.things import thing_repository\n",
+            "gateway.repositories.things",
+        ),
+        (
+            "gateway/services/thing_service.py",
+            "from gateway.repositories.things import ThingRepository\n",
+            "gateway.repositories.things",
+        ),
+    ],
+)
+def test_importing_another_domains_repositories_is_flagged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative_path: str, source: str, module: str
+) -> None:
+    monkeypatch.setattr(check, "REPOSITORY_IMPORT_BASELINE", ())
+    _write_things_repositories(tmp_path)
+    _write(tmp_path, relative_path, source)
+    assert check.check_repository_imports(tmp_path) == [f"{relative_path}:1 imports {module}; {_REPOSITORY_REMEDY}"]
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "source"),
+    [
+        ("gateway/services/things/_service.py", "from gateway.repositories.things import ThingRepository\n"),
+        ("gateway/repositories/things/other_repository.py", "from .thing_repository import ThingRepository\n"),
+        ("gateway/api/deps.py", "from gateway.repositories.things import ThingRepository\n"),
+        ("gateway/services/widgets/_store.py", "from gateway.repositories.base_repository import BaseRepository\n"),
+        ("gateway/services/widgets/_store.py", "from gateway.repositories import users_repository\n"),
+    ],
+)
+def test_importing_a_domains_own_or_shared_repositories_is_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative_path: str, source: str
+) -> None:
+    monkeypatch.setattr(check, "REPOSITORY_IMPORT_BASELINE", ())
+    _write_things_repositories(tmp_path)
+    _write(tmp_path, relative_path, source)
+    assert check.check_repository_imports(tmp_path) == []
+
+
+def test_one_statement_importing_two_domains_repositories_is_flagged_once_per_domain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(check, "REPOSITORY_IMPORT_BASELINE", ())
+    _write_things_repositories(tmp_path)
+    _write(tmp_path, "gateway/repositories/widgets/__init__.py", "")
+    _write(
+        tmp_path,
+        "gateway/core/thing.py",
+        "import gateway.repositories.widgets, gateway.repositories.things.thing_repository\n",
+    )
+    assert check.check_repository_imports(tmp_path) == [
+        f"gateway/core/thing.py:1 imports gateway.repositories.things; {_REPOSITORY_REMEDY}",
+        f"gateway/core/thing.py:1 imports gateway.repositories.widgets; {_REPOSITORY_REMEDY}",
+    ]
+
+
+def test_an_import_pair_on_the_repository_import_baseline_is_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        check, "REPOSITORY_IMPORT_BASELINE", (("gateway/services/widgets/_store.py", "gateway.repositories.things"),)
+    )
+    _write_things_repositories(tmp_path)
+    _write(
+        tmp_path,
+        "gateway/services/widgets/_store.py",
+        "from gateway.repositories.things import ThingRepository\n"
+        "from gateway.repositories.things import thing_repository\n",
+    )
+    assert check.check_repository_imports(tmp_path) == []
+
+
+def test_a_new_domain_imported_by_a_module_on_the_repository_import_baseline_is_flagged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        check, "REPOSITORY_IMPORT_BASELINE", (("gateway/services/gadgets/_store.py", "gateway.repositories.things"),)
+    )
+    _write_things_repositories(tmp_path)
+    _write(tmp_path, "gateway/repositories/widgets/__init__.py", "")
+    _write(
+        tmp_path,
+        "gateway/services/gadgets/_store.py",
+        "from gateway.repositories.things import ThingRepository\n"
+        "from gateway.repositories.widgets import WidgetRepository\n",
+    )
+    assert check.check_repository_imports(tmp_path) == [
+        f"gateway/services/gadgets/_store.py:2 imports gateway.repositories.widgets; {_REPOSITORY_REMEDY}"
+    ]
+
+
+@pytest.mark.parametrize("source", ["from gateway.repositories.base_repository import BaseRepository\n", None])
+def test_a_repository_import_pair_no_module_makes_must_leave_the_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str | None
+) -> None:
+    monkeypatch.setattr(
+        check, "REPOSITORY_IMPORT_BASELINE", (("gateway/services/widgets/_store.py", "gateway.repositories.things"),)
+    )
+    _write_things_repositories(tmp_path)
+    if source is not None:
+        _write(tmp_path, "gateway/services/widgets/_store.py", source)
+    assert check.check_repository_imports(tmp_path) == [
+        "gateway/services/widgets/_store.py no longer imports gateway.repositories.things; "
+        "remove the pair from the repository import baseline"
+    ]
+
+
+def test_main_fails_on_an_import_of_another_domains_repositories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, "src/gateway/repositories/things/__init__.py", "")
+    _write(tmp_path, "tests/__init__.py", "")
+    _point_main_at(tmp_path, monkeypatch)
+    assert check.main() == 0
+    _write(tmp_path, "src/gateway/core/thing.py", "from gateway.repositories.things import ThingRepository\n")
+    assert check.main() == 1

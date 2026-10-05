@@ -49,6 +49,11 @@ Enforces:
     each name is a domain that docs/domains.md gives a section. An exceptions
     module is named <domain>_exceptions.py. The names that do not match yet are
     on a baseline, and the baseline only shrinks.
+20. Repository imports: only a domain's own service package, its own
+    repository package and the builders in gateway/api/deps.py import
+    repositories.<domain>, so a domain's queries stay behind its service. Each
+    module that still imports another domain's repositories is on a baseline
+    with the domain package it imports, and the baseline only shrinks.
 
 Usage:
     uv run python scripts/check_architecture.py
@@ -935,6 +940,91 @@ def check_domain_names(src_root: Path, doc_path: Path) -> list[str]:
     return violations
 
 
+REPOSITORY_SCOPE = "gateway/repositories"
+SERVICE_BUILDERS = "gateway/api/deps.py"
+# Each module that still imports another domain's repositories, paired with the
+# domain package it imports. A new pair fails the check, including one in a
+# module already listed, and a pair no module makes any more fails the check
+# until it is removed, so the list only shrinks.
+REPOSITORY_IMPORT_BASELINE = (
+    ("gateway/adapters/identity_provider_adapter.py", "gateway.repositories.tenancy"),
+    ("gateway/services/budgets/_member_policies.py", "gateway.repositories.tenancy"),
+    ("gateway/services/organization_pricing_service.py", "gateway.repositories.pricing"),
+    ("gateway/services/providers/_org_provider_model_service.py", "gateway.repositories.tenancy"),
+    ("gateway/services/tenancy/org_provider_key_service.py", "gateway.repositories.providers"),
+    ("gateway/services/tenancy/organization_model_access.py", "gateway.repositories.providers"),
+)
+
+
+def _domain_packages(src_root: Path, layer: str) -> set[str]:
+    """Return the name of each domain package in a layer."""
+    layer_root = src_root / layer
+    if not layer_root.is_dir():
+        return set()
+    return {package.name for package in layer_root.iterdir() if (package / "__init__.py").is_file()}
+
+
+def _imported_domain(module: str, layer: str, domains: set[str]) -> str | None:
+    """Return the domain package of a layer that a module path lies in, or None if it lies in none."""
+    prefix = layer.replace("/", ".") + "."
+    if not module.startswith(prefix):
+        return None
+    domain = module.removeprefix(prefix).split(".")[0]
+    return domain if domain in domains else None
+
+
+def _baseline_violations(
+    findings: list[tuple[str, int, str]], baseline: tuple[tuple[str, str], ...], remedy: str, baseline_name: str
+) -> list[str]:
+    """Report each import found whose module and target pair is off the baseline, and each pair no import makes."""
+    violations = [
+        f"{relative_path}:{line} imports {target}; {remedy}"
+        for relative_path, line, target in findings
+        if (relative_path, target) not in baseline
+    ]
+    made = {(relative_path, target) for relative_path, _, target in findings}
+    violations.extend(
+        f"{relative_path} no longer imports {target}; remove the pair from the {baseline_name} baseline"
+        for relative_path, target in sorted(set(baseline) - made)
+    )
+    return violations
+
+
+def _import_statements(tree: ast.Module, file_path: Path, src_root: Path) -> Iterator[tuple[int, list[str]]]:
+    """Yield the line of each import statement in a module and the absolute module paths it pulls in."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            yield node.lineno, _imported_modules(node, file_path, src_root)
+
+
+def _foreign_repository_package(module: str, relative_path: str, domains: set[str]) -> str | None:
+    """Return the repository package of another domain that a module lies in, or None if it lies in none."""
+    domain = _imported_domain(module, REPOSITORY_SCOPE, domains)
+    if domain is None or relative_path.startswith((f"{SERVICE_SCOPE}/{domain}/", f"{REPOSITORY_SCOPE}/{domain}/")):
+        return None
+    return f"{REPOSITORY_SCOPE.replace('/', '.')}.{domain}"
+
+
+def check_repository_imports(src_root: Path) -> list[str]:
+    """Check that only a domain's own packages and the service builders import its repositories."""
+    domains = _domain_packages(src_root, REPOSITORY_SCOPE)
+    findings: list[tuple[str, int, str]] = []
+    for relative_path, tree in _parsed_modules(src_root, "gateway", exempt=(SERVICE_BUILDERS,)):
+        for line, modules in _import_statements(tree, src_root / relative_path, src_root):
+            packages = {
+                package
+                for module in modules
+                if (package := _foreign_repository_package(module, relative_path, domains)) is not None
+            }
+            findings.extend((relative_path, line, package) for package in sorted(packages))
+    return _baseline_violations(
+        sorted(findings),
+        REPOSITORY_IMPORT_BASELINE,
+        f"only the domain's own service package and the builders in {SERVICE_BUILDERS} import its repositories",
+        "repository import",
+    )
+
+
 def main() -> int:
     """Run the architecture checks over the gateway package, the light CLI and the OSS test suite."""
     # All must exist: silently skipping one would let its rules (including
@@ -973,6 +1063,7 @@ def main() -> int:
     transaction_violations = check_transaction_control(SRC_ROOT)
     unit_of_work_violations = check_unit_of_work_construction(SRC_ROOT)
     domain_name_violations = check_domain_names(SRC_ROOT, REPO_ROOT / DOMAINS_DOC)
+    repository_import_violations = check_repository_imports(SRC_ROOT)
 
     if import_violations:
         print("❌ Architecture violations found:\n")
@@ -1023,6 +1114,12 @@ def main() -> int:
             print(f"  {violation}")
         print(f"\nTotal domain name violations: {len(domain_name_violations)}")
 
+    if repository_import_violations:
+        print("\n❌ Repository import violations:\n")
+        for violation in repository_import_violations:
+            print(f"  {violation}")
+        print(f"\nTotal repository import violations: {len(repository_import_violations)}")
+
     if (
         import_violations
         or naming_violations
@@ -1032,6 +1129,7 @@ def main() -> int:
         or unit_of_work_violations
         or flat_module_violations
         or domain_name_violations
+        or repository_import_violations
     ):
         print("\n💡 See ARCHITECTURE.md for the intended layering")
         return 1
