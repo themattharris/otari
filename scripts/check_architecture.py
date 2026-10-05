@@ -58,6 +58,9 @@ Enforces:
     only its root, so the root's exports are the domain's whole public API.
     Each module that still imports below another domain's root is on a
     baseline with the module it imports, and the baseline only shrinks.
+22. Service dependency cycles: no two domain service packages import each
+    other, directly or through other domain service packages or flat service
+    modules, so dependencies between domains run one way.
 
 Usage:
     uv run python scripts/check_architecture.py
@@ -1176,6 +1179,95 @@ def check_service_package_imports(src_root: Path) -> list[str]:
     )
 
 
+# Each import between service packages and flat service modules that lies on a
+# cycle joining two domains. A new import on such a cycle fails the check, and
+# a pair that no longer lies on one fails the check until it is removed, so
+# the list only shrinks.
+SERVICE_CYCLE_BASELINE = (
+    ("gateway.services.alias_service", "gateway.services.workspace_scope"),
+    ("gateway.services.files", "gateway.services.provider_kwargs"),
+    ("gateway.services.mcp_loop", "gateway.services.tools"),
+    ("gateway.services.policy_store", "gateway.services.workspace_scope"),
+    ("gateway.services.provider_kwargs", "gateway.services.alias_service"),
+    ("gateway.services.provider_kwargs", "gateway.services.policy_store"),
+    ("gateway.services.provider_kwargs", "gateway.services.tenancy"),
+    ("gateway.services.sandbox_backend", "gateway.services.files"),
+    ("gateway.services.tenancy", "gateway.services.mcp_loop"),
+    ("gateway.services.tenancy", "gateway.services.provider_kwargs"),
+    ("gateway.services.tenancy", "gateway.services.sandbox_backend"),
+    ("gateway.services.tenancy", "gateway.services.workspace_scope"),
+    ("gateway.services.tools", "gateway.services.sandbox_backend"),
+    ("gateway.services.tools", "gateway.services.tenancy"),
+    ("gateway.services.workspace_scope", "gateway.services.tenancy"),
+)
+
+
+def _service_nodes(modules: list[str], nodes: set[str]) -> set[str]:
+    """Return the domain service packages and flat service modules that a list of module paths lies in."""
+    return {node for module in modules if (node := _imported_domain(module, SERVICE_SCOPE, nodes)) is not None}
+
+
+def _service_dependencies(src_root: Path, nodes: set[str]) -> dict[tuple[str, str], tuple[str, int]]:
+    """Return each import of one service package or flat module by another, with the first module and line making it."""
+    dependencies: dict[tuple[str, str], tuple[str, int]] = {}
+    for relative_path, tree in _parsed_modules(src_root, SERVICE_SCOPE):
+        importer = _imported_domain(relative_path.removesuffix(".py").replace("/", "."), SERVICE_SCOPE, nodes)
+        if importer is None:
+            continue
+        for line, modules in _import_statements(tree, src_root / relative_path, src_root):
+            for imported in _service_nodes(modules, nodes) - {importer}:
+                site = (relative_path, line)
+                dependencies[(importer, imported)] = min(dependencies.get((importer, imported), site), site)
+    return dependencies
+
+
+def _reachable(graph: dict[str, set[str]], start: str) -> set[str]:
+    """Return every node a directed graph reaches from start, including start."""
+    reached = {start}
+    pending = [start]
+    while pending:
+        for successor in graph.get(pending.pop(), set()) - reached:
+            reached.add(successor)
+            pending.append(successor)
+    return reached
+
+
+def check_service_cycles(src_root: Path) -> list[str]:
+    """Check that no two domain service packages import each other, directly or through other service modules.
+
+    A cycle among flat service modules alone joins no two domains, so it is not reported.
+    """
+    service_root = src_root / SERVICE_SCOPE
+    if not service_root.is_dir():
+        return []
+    domains = _domain_packages(src_root, SERVICE_SCOPE)
+    dependencies = _service_dependencies(src_root, _package_members(service_root))
+    graph: dict[str, set[str]] = {}
+    for importer, imported in dependencies:
+        graph.setdefault(importer, set()).add(imported)
+    reach = {node: _reachable(graph, node) for node in graph}
+    service_package = SERVICE_SCOPE.replace("/", ".")
+    violations: list[str] = []
+    on_a_cycle: set[tuple[str, str]] = set()
+    for (importer, imported), (relative_path, line) in sorted(dependencies.items()):
+        cycle = {node for node in reach[importer] if importer in reach.get(node, {node})}
+        if imported not in cycle or len(cycle & domains) < 2:
+            continue
+        edge = (f"{service_package}.{importer}", f"{service_package}.{imported}")
+        on_a_cycle.add(edge)
+        if edge not in SERVICE_CYCLE_BASELINE:
+            violations.append(
+                f"{relative_path}:{line} imports {edge[1]}, which depends on {edge[0]}; dependencies between domains "
+                "run one way, so the domain where a change happens defines a listener the other implements"
+            )
+    violations.extend(
+        f"{importer} importing {imported} no longer joins two domains in a cycle; "
+        "remove the pair from the service cycle baseline"
+        for importer, imported in sorted(set(SERVICE_CYCLE_BASELINE) - on_a_cycle)
+    )
+    return violations
+
+
 def main() -> int:
     """Run the architecture checks over the gateway package, the light CLI and the OSS test suite."""
     # All must exist: silently skipping one would let its rules (including
@@ -1216,6 +1308,7 @@ def main() -> int:
     domain_name_violations = check_domain_names(SRC_ROOT, REPO_ROOT / DOMAINS_DOC)
     repository_import_violations = check_repository_imports(SRC_ROOT)
     service_package_import_violations = check_service_package_imports(SRC_ROOT)
+    service_cycle_violations = check_service_cycles(SRC_ROOT)
 
     if import_violations:
         print("❌ Architecture violations found:\n")
@@ -1278,6 +1371,12 @@ def main() -> int:
             print(f"  {violation}")
         print(f"\nTotal service package import violations: {len(service_package_import_violations)}")
 
+    if service_cycle_violations:
+        print("\n❌ Service dependency cycle violations:\n")
+        for violation in service_cycle_violations:
+            print(f"  {violation}")
+        print(f"\nTotal service dependency cycle violations: {len(service_cycle_violations)}")
+
     if (
         import_violations
         or naming_violations
@@ -1289,6 +1388,7 @@ def main() -> int:
         or domain_name_violations
         or repository_import_violations
         or service_package_import_violations
+        or service_cycle_violations
     ):
         print("\n💡 See ARCHITECTURE.md for the intended layering")
         return 1

@@ -18,7 +18,7 @@ against the rules below, and do not accept "the module next to it does the
 same" as a reason.
 
 `SERVICE_DATABASE_IMPORT_BASELINE`, `ROUTE_DATABASE_IMPORT_BASELINE`, `FLAT_MODULE_BASELINE`,
-`REPOSITORY_IMPORT_BASELINE` and `SERVICE_PACKAGE_IMPORT_BASELINE` in
+`REPOSITORY_IMPORT_BASELINE`, `SERVICE_PACKAGE_IMPORT_BASELINE` and `SERVICE_CYCLE_BASELINE` in
 `scripts/check_architecture.py` name the code still in the old shape.
 
 - Do not flag an existing baseline entry the PR does not touch.
@@ -80,15 +80,13 @@ same" as a reason.
 - Only the domain's own service package and `api/deps.py` import
   `gateway.repositories.<domain>`. The check refuses any other import of
   one, except a module and domain pair on `REPOSITORY_IMPORT_BASELINE`.
-- Flag an import that makes two domain services depend on each other in a
-  cycle. A domain that must react to a change in a domain that does not depend
-  on it receives a listener interface by constructor injection, defined by the
-  domain where the change happens.
+- The check refuses an import that makes two domain service packages depend
+  on each other in a cycle, directly or through flat service modules, except
+  a pair on `SERVICE_CYCLE_BASELINE`. A domain that must react to a change in
+  a domain that does not depend on it receives a listener interface by
+  constructor injection, defined by the domain where the change happens.
 - Flag a listener implementation that commits or rolls back. The caller owns
   the transaction.
-
-The boundary check does not enforce the cycle rule yet, so review is the only
-gate for it.
 
 ## Errors
 

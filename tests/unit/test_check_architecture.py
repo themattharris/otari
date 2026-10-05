@@ -1260,3 +1260,164 @@ def test_main_fails_on_an_import_below_a_service_package_root(tmp_path: Path, mo
     assert check.main() == 0
     _write(tmp_path, "src/gateway/core/thing.py", "from gateway.services.things._store import Store\n")
     assert check.main() == 1
+
+
+_CYCLE_REMEDY = (
+    "dependencies between domains run one way, so the domain where a change happens defines a listener the other "
+    "implements"
+)
+
+
+def _write_service_packages(src_root: Path, sources: dict[str, str]) -> None:
+    for package, source in sources.items():
+        _write(src_root, f"gateway/services/{package}/__init__.py", "")
+        _write(src_root, f"gateway/services/{package}/_service.py", source)
+
+
+def test_two_service_packages_that_import_each_other_are_flagged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(check, "SERVICE_CYCLE_BASELINE", ())
+    _write_service_packages(
+        tmp_path,
+        {"things": "from gateway.services.widgets import WidgetService\n", "widgets": "\nfrom ..things import Thing\n"},
+    )
+    assert check.check_service_cycles(tmp_path) == [
+        "gateway/services/things/_service.py:1 imports gateway.services.widgets, which depends on "
+        f"gateway.services.things; {_CYCLE_REMEDY}",
+        "gateway/services/widgets/_service.py:2 imports gateway.services.things, which depends on "
+        f"gateway.services.widgets; {_CYCLE_REMEDY}",
+    ]
+
+
+def test_a_cycle_through_a_third_service_package_is_flagged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "SERVICE_CYCLE_BASELINE", ())
+    _write_service_packages(
+        tmp_path,
+        {
+            "things": "from gateway.services.widgets import WidgetService\n",
+            "widgets": "from gateway.services.gadgets import GadgetService\n",
+            "gadgets": "from gateway.services.things import ThingService\n",
+        },
+    )
+    assert [violation.split(" imports ")[0] for violation in check.check_service_cycles(tmp_path)] == [
+        "gateway/services/gadgets/_service.py:1",
+        "gateway/services/things/_service.py:1",
+        "gateway/services/widgets/_service.py:1",
+    ]
+
+
+def test_a_cycle_through_a_flat_service_module_is_flagged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "SERVICE_CYCLE_BASELINE", ())
+    _write_service_packages(
+        tmp_path,
+        {
+            "things": "from gateway.services.widgets import WidgetService\n",
+            "widgets": "from gateway.services.thing_helpers import helper\n",
+        },
+    )
+    _write(tmp_path, "gateway/services/thing_helpers.py", "from gateway.services.things import ThingService\n")
+    assert [violation.split(", which")[0] for violation in check.check_service_cycles(tmp_path)] == [
+        "gateway/services/thing_helpers.py:1 imports gateway.services.things",
+        "gateway/services/things/_service.py:1 imports gateway.services.widgets",
+        "gateway/services/widgets/_service.py:1 imports gateway.services.thing_helpers",
+    ]
+
+
+def test_a_cycle_is_reported_at_the_first_import_that_makes_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "SERVICE_CYCLE_BASELINE", ())
+    _write_service_packages(
+        tmp_path,
+        {
+            "things": "import os\nfrom gateway.services.widgets import A\nfrom gateway.services.widgets import B\n",
+            "widgets": "from gateway.services.things import ThingService\n",
+        },
+    )
+    assert check.check_service_cycles(tmp_path)[0].startswith(
+        "gateway/services/things/_service.py:2 imports gateway.services.widgets,"
+    )
+
+
+@pytest.mark.parametrize(
+    "widgets_source",
+    [
+        "from gateway.services.gadgets import GadgetService\n",
+        "from gateway.services.widgets._store import Store\n",
+        "from gateway.services.widget_helpers import helper\n",
+    ],
+)
+def test_service_imports_that_run_one_way_are_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, widgets_source: str
+) -> None:
+    monkeypatch.setattr(check, "SERVICE_CYCLE_BASELINE", ())
+    _write_service_packages(
+        tmp_path,
+        {"things": "from gateway.services.widgets import WidgetService\n", "widgets": widgets_source, "gadgets": ""},
+    )
+    _write(tmp_path, "gateway/services/thing_service.py", "from gateway.services.things import ThingService\n")
+    _write(tmp_path, "gateway/services/widget_helpers.py", "from gateway.services.gadgets import GadgetService\n")
+    assert check.check_service_cycles(tmp_path) == []
+
+
+def test_a_cycle_among_flat_service_modules_alone_is_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "SERVICE_CYCLE_BASELINE", ())
+    _write_service_packages(tmp_path, {"things": "from gateway.services.loop import run\n"})
+    _write(tmp_path, "gateway/services/loop.py", "from gateway.services.loop_messages import render\n")
+    _write(tmp_path, "gateway/services/loop_messages.py", "from gateway.services.loop import run\n")
+    assert check.check_service_cycles(tmp_path) == []
+
+
+def _write_baselined_cycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        check,
+        "SERVICE_CYCLE_BASELINE",
+        (
+            ("gateway.services.things", "gateway.services.widgets"),
+            ("gateway.services.widgets", "gateway.services.things"),
+        ),
+    )
+    _write_service_packages(
+        tmp_path,
+        {"things": "from gateway.services.widgets import W\n", "widgets": "from gateway.services.things import T\n"},
+    )
+
+
+def test_an_import_on_the_service_cycle_baseline_is_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_baselined_cycle(tmp_path, monkeypatch)
+    assert check.check_service_cycles(tmp_path) == []
+
+
+def test_a_new_import_on_a_baselined_cycle_is_flagged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_baselined_cycle(tmp_path, monkeypatch)
+    _write(tmp_path, "gateway/services/gadgets/__init__.py", "from gateway.services.things import T\n")
+    _write(tmp_path, "gateway/services/things/_gadgets.py", "from gateway.services.gadgets import G\n")
+    assert [violation.split(", which")[0] for violation in check.check_service_cycles(tmp_path)] == [
+        "gateway/services/gadgets/__init__.py:1 imports gateway.services.things",
+        "gateway/services/things/_gadgets.py:1 imports gateway.services.gadgets",
+    ]
+
+
+def test_a_service_cycle_baseline_pair_off_every_cycle_must_leave_the_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_baselined_cycle(tmp_path, monkeypatch)
+    _write(tmp_path, "gateway/services/widgets/_service.py", "")
+    assert check.check_service_cycles(tmp_path) == [
+        "gateway.services.things importing gateway.services.widgets no longer joins two domains in a cycle; "
+        "remove the pair from the service cycle baseline",
+        "gateway.services.widgets importing gateway.services.things no longer joins two domains in a cycle; "
+        "remove the pair from the service cycle baseline",
+    ]
+
+
+def test_main_fails_on_a_service_dependency_cycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(tmp_path, "src/gateway/services/things/__init__.py", "")
+    _write(tmp_path, "src/gateway/services/things/_service.py", "")
+    _write(tmp_path, "tests/__init__.py", "")
+    _point_main_at(tmp_path, monkeypatch)
+    # The cycle needs a second documented domain, or the domain name check fails main() first.
+    _write(tmp_path, "docs/domains.md", "## The domains\n\n### things\n\n### widgets\n")
+    _write(tmp_path, "src/gateway/services/widgets/__init__.py", "from gateway.services.things import ThingService\n")
+    assert check.main() == 0
+    _write(tmp_path, "src/gateway/services/things/_service.py", "from gateway.services.widgets import WidgetService\n")
+    assert check.main() == 1
