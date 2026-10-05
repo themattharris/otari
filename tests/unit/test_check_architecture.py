@@ -1144,3 +1144,119 @@ def test_main_fails_on_an_import_of_another_domains_repositories(
     assert check.main() == 0
     _write(tmp_path, "src/gateway/core/thing.py", "from gateway.repositories.things import ThingRepository\n")
     assert check.main() == 1
+
+
+_SERVICE_PACKAGE_REMEDY = "code outside a domain imports what its service package root exports"
+
+
+def _write_things_service(src_root: Path) -> None:
+    _write(src_root, "gateway/services/things/__init__.py", "from ._store import Store\n")
+    _write(src_root, "gateway/services/things/_store.py", "")
+    _write(src_root, "gateway/services/things/store.py", "")
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "source", "module"),
+    [
+        (
+            "gateway/api/routes/things.py",
+            "from gateway.services.things._store import Store\n",
+            "gateway.services.things._store",
+        ),
+        (
+            "gateway/api/routes/things.py",
+            "from gateway.services.things import _store\n",
+            "gateway.services.things._store",
+        ),
+        ("gateway/api/deps.py", "import gateway.services.things.store\n", "gateway.services.things.store"),
+        ("gateway/services/widgets/_service.py", "from ..things.store import Store\n", "gateway.services.things.store"),
+        (
+            "gateway/services/thing_service.py",
+            "from gateway.services.things.store import Store\n",
+            "gateway.services.things.store",
+        ),
+    ],
+)
+def test_importing_below_another_domains_service_package_root_is_flagged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative_path: str, source: str, module: str
+) -> None:
+    monkeypatch.setattr(check, "SERVICE_PACKAGE_IMPORT_BASELINE", ())
+    _write_things_service(tmp_path)
+    _write(tmp_path, relative_path, source)
+    assert check.check_service_package_imports(tmp_path) == [
+        f"{relative_path}:1 imports {module}; {_SERVICE_PACKAGE_REMEDY}"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "source"),
+    [
+        ("gateway/api/routes/things.py", "from gateway.services.things import Store\n"),
+        ("gateway/api/routes/things.py", "from gateway.services import things\n"),
+        ("gateway/services/things/_service.py", "from gateway.services.things._store import Store\n"),
+        ("gateway/services/things/_service.py", "from ._store import Store\n"),
+        ("gateway/api/routes/things.py", "from gateway.services.thing_service import ThingService\n"),
+    ],
+)
+def test_importing_a_service_package_root_or_own_modules_is_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative_path: str, source: str
+) -> None:
+    monkeypatch.setattr(check, "SERVICE_PACKAGE_IMPORT_BASELINE", ())
+    _write_things_service(tmp_path)
+    _write(tmp_path, "gateway/services/thing_service.py", "")
+    _write(tmp_path, relative_path, source)
+    assert check.check_service_package_imports(tmp_path) == []
+
+
+def test_an_import_pair_on_the_service_package_import_baseline_is_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        check, "SERVICE_PACKAGE_IMPORT_BASELINE", (("gateway/api/routes/things.py", "gateway.services.things.store"),)
+    )
+    _write_things_service(tmp_path)
+    _write(tmp_path, "gateway/api/routes/things.py", "from gateway.services.things.store import Store\n")
+    assert check.check_service_package_imports(tmp_path) == []
+
+
+def test_a_new_module_imported_by_a_module_on_the_service_package_import_baseline_is_flagged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        check, "SERVICE_PACKAGE_IMPORT_BASELINE", (("gateway/api/routes/things.py", "gateway.services.things.store"),)
+    )
+    _write_things_service(tmp_path)
+    _write(
+        tmp_path,
+        "gateway/api/routes/things.py",
+        "from gateway.services.things.store import Store\nfrom gateway.services.things._store import Store\n",
+    )
+    assert check.check_service_package_imports(tmp_path) == [
+        f"gateway/api/routes/things.py:2 imports gateway.services.things._store; {_SERVICE_PACKAGE_REMEDY}"
+    ]
+
+
+@pytest.mark.parametrize("source", ["from gateway.services.things import Store\n", None])
+def test_a_service_package_import_pair_no_module_makes_must_leave_the_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str | None
+) -> None:
+    monkeypatch.setattr(
+        check, "SERVICE_PACKAGE_IMPORT_BASELINE", (("gateway/api/routes/things.py", "gateway.services.things.store"),)
+    )
+    _write_things_service(tmp_path)
+    if source is not None:
+        _write(tmp_path, "gateway/api/routes/things.py", source)
+    assert check.check_service_package_imports(tmp_path) == [
+        "gateway/api/routes/things.py no longer imports gateway.services.things.store; "
+        "remove the pair from the service package import baseline"
+    ]
+
+
+def test_main_fails_on_an_import_below_a_service_package_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(tmp_path, "src/gateway/services/things/__init__.py", "")
+    _write(tmp_path, "src/gateway/services/things/_store.py", "")
+    _write(tmp_path, "tests/__init__.py", "")
+    _point_main_at(tmp_path, monkeypatch)
+    assert check.main() == 0
+    _write(tmp_path, "src/gateway/core/thing.py", "from gateway.services.things._store import Store\n")
+    assert check.main() == 1

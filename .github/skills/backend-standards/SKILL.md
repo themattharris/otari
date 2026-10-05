@@ -69,8 +69,8 @@ domain fits together and the domain test, says what each domain owns, and gives 
 moving one domain into the shape. This section adds the house style for code in those layers.
 
 **New and moved code follows the target shape. Most existing code does not, so never copy the
-module beside yours.** `SERVICE_DATABASE_IMPORT_BASELINE`, `ROUTE_DATABASE_IMPORT_BASELINE`, `FLAT_MODULE_BASELINE` and
-`REPOSITORY_IMPORT_BASELINE` in `scripts/check_architecture.py` name the code still in the old shape. A baseline only shrinks:
+module beside yours.** `SERVICE_DATABASE_IMPORT_BASELINE`, `ROUTE_DATABASE_IMPORT_BASELINE`, `FLAT_MODULE_BASELINE`,
+`REPOSITORY_IMPORT_BASELINE` and `SERVICE_PACKAGE_IMPORT_BASELINE` in `scripts/check_architecture.py` name the code still in the old shape. A baseline only shrinks:
 remove a name when you move its code, and never add one.
 
 - **Routes** return typed schemas, not raw dicts, and use `fastapi.status` constants.

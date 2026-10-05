@@ -54,6 +54,10 @@ Enforces:
     repositories.<domain>, so a domain's queries stay behind its service. Each
     module that still imports another domain's repositories is on a baseline
     with the domain package it imports, and the baseline only shrinks.
+21. Service package imports: code outside a domain service package imports
+    only its root, so the root's exports are the domain's whole public API.
+    Each module that still imports below another domain's root is on a
+    baseline with the module it imports, and the baseline only shrinks.
 
 Usage:
     uv run python scripts/check_architecture.py
@@ -66,7 +70,7 @@ Exit codes:
 import ast
 import re
 import sys
-from collections.abc import Iterator
+from collections.abc import Container, Iterator
 from pathlib import Path
 from typing import TypedDict
 
@@ -964,7 +968,7 @@ def _domain_packages(src_root: Path, layer: str) -> set[str]:
     return {package.name for package in layer_root.iterdir() if (package / "__init__.py").is_file()}
 
 
-def _imported_domain(module: str, layer: str, domains: set[str]) -> str | None:
+def _imported_domain(module: str, layer: str, domains: Container[str]) -> str | None:
     """Return the domain package of a layer that a module path lies in, or None if it lies in none."""
     prefix = layer.replace("/", ".") + "."
     if not module.startswith(prefix):
@@ -1025,6 +1029,153 @@ def check_repository_imports(src_root: Path) -> list[str]:
     )
 
 
+# Each module that still imports below the root of another domain's service
+# package, paired with the module directly below the root that it imports. A
+# new pair fails the check, including one in a module already listed, and a
+# pair no module makes any more fails the check until it is removed, so the
+# list only shrinks.
+SERVICE_PACKAGE_IMPORT_BASELINE = (
+    (
+        "gateway/adapters/code_execution_policy_adapter.py",
+        "gateway.services.tenancy.workspace_code_execution_policy_service",
+    ),
+    ("gateway/adapters/identity_provider_adapter.py", "gateway.services.tenancy.email_address"),
+    ("gateway/adapters/mcp_server_adapter.py", "gateway.services.tenancy.workspace_mcp_server_service"),
+    ("gateway/adapters/web_search_policy_adapter.py", "gateway.services.tenancy.workspace_web_search_service"),
+    ("gateway/api/deps.py", "gateway.services.overview.overview_service"),
+    ("gateway/api/deps.py", "gateway.services.tenancy.deployment_user_service"),
+    ("gateway/api/deps.py", "gateway.services.tenancy.org_provider_key_service"),
+    ("gateway/api/deps.py", "gateway.services.tenancy.organization_guardrail_definition_service"),
+    ("gateway/api/deps.py", "gateway.services.tenancy.organization_guardrail_runner"),
+    ("gateway/api/deps.py", "gateway.services.tenancy.provisioning_service"),
+    ("gateway/api/deps.py", "gateway.services.tenancy.workspace_service"),
+    ("gateway/api/routes/_helpers.py", "gateway.services.routing.decide"),
+    ("gateway/api/routes/_passthrough.py", "gateway.services.tenancy.org_provider_key_service"),
+    ("gateway/api/routes/_pipeline.py", "gateway.services.routing.decide"),
+    ("gateway/api/routes/_pipeline.py", "gateway.services.tenancy.org_provider_key_service"),
+    ("gateway/api/routes/_pipeline.py", "gateway.services.tenancy.organization_guardrail_runner"),
+    ("gateway/api/routes/_pipeline.py", "gateway.services.tenancy.organization_guardrail_service"),
+    ("gateway/api/routes/_pipeline.py", "gateway.services.tenancy.workspace_code_execution_policy_service"),
+    ("gateway/api/routes/_platform.py", "gateway.services.control_plane.transport"),
+    ("gateway/api/routes/admin.py", "gateway.services.tenancy.deployment_user_service"),
+    ("gateway/api/routes/auth_oauth.py", "gateway.services.tenancy.organization_domain_service"),
+    ("gateway/api/routes/auth_password.py", "gateway.services.tenancy.email_address"),
+    ("gateway/api/routes/auth_password.py", "gateway.services.tenancy.provisioning_service"),
+    ("gateway/api/routes/auth_password.py", "gateway.services.tenancy.user_service"),
+    ("gateway/api/routes/auth_password_reset.py", "gateway.services.tenancy.email_address"),
+    ("gateway/api/routes/auth_password_reset.py", "gateway.services.tenancy.user_service"),
+    ("gateway/api/routes/auth_profile.py", "gateway.services.tenancy.provisioning_service"),
+    ("gateway/api/routes/auth_profile.py", "gateway.services.tenancy.user_service"),
+    ("gateway/api/routes/auth_session.py", "gateway.services.tenancy.email_address"),
+    ("gateway/api/routes/auth_session.py", "gateway.services.tenancy.organization_domain_service"),
+    ("gateway/api/routes/auth_session.py", "gateway.services.tenancy.provisioning_service"),
+    ("gateway/api/routes/auth_session.py", "gateway.services.tenancy.user_service"),
+    ("gateway/api/routes/auth_signup.py", "gateway.services.tenancy.email_address"),
+    ("gateway/api/routes/auth_signup.py", "gateway.services.tenancy.user_service"),
+    ("gateway/api/routes/auth_webauthn.py", "gateway.services.tenancy.organization_domain_service"),
+    ("gateway/api/routes/auth_webauthn.py", "gateway.services.tenancy.webauthn_service"),
+    ("gateway/api/routes/batches.py", "gateway.services.tenancy.org_provider_key_service"),
+    ("gateway/api/routes/bootstrap.py", "gateway.services.tenancy.user_service"),
+    ("gateway/api/routes/bootstrap.py", "gateway.services.tenancy.webauthn_service"),
+    (
+        "gateway/api/routes/organization_guardrail_definitions.py",
+        "gateway.services.tenancy.organization_guardrail_definition_service",
+    ),
+    ("gateway/api/routes/organization_guardrails.py", "gateway.services.tenancy.organization_guardrail_service"),
+    ("gateway/api/routes/organization_keys.py", "gateway.services.tenancy.authorization"),
+    ("gateway/api/routes/organization_routing.py", "gateway.services.tenancy.authorization"),
+    ("gateway/api/routes/organization_routing.py", "gateway.services.tenancy.organization_model_access"),
+    ("gateway/api/routes/organization_usage.py", "gateway.services.tenancy.authorization"),
+    ("gateway/api/routes/overview.py", "gateway.services.overview.overview_service"),
+    ("gateway/api/routes/routing.py", "gateway.services.routing.decide"),
+    ("gateway/api/routes/routing.py", "gateway.services.routing.knn"),
+    ("gateway/api/routes/routing_memory.py", "gateway.services.routing.knn"),
+    ("gateway/api/routes/search.py", "gateway.services.tenancy.workspace_web_search_service"),
+    ("gateway/api/routes/tool_settings.py", "gateway.services.tenancy.deployment_user_service"),
+    ("gateway/api/routes/workspace_activation.py", "gateway.services.tenancy.workspace_activation_service"),
+    (
+        "gateway/api/routes/workspace_code_execution_policy.py",
+        "gateway.services.tenancy.workspace_code_execution_policy_service",
+    ),
+    ("gateway/api/routes/workspace_mcp_servers.py", "gateway.services.tenancy.workspace_mcp_server_service"),
+    ("gateway/api/routes/workspace_web_search.py", "gateway.services.tenancy.workspace_web_search_service"),
+    ("gateway/cli.py", "gateway.services.routing.backends"),
+    ("gateway/cli.py", "gateway.services.routing.decide"),
+    ("gateway/main.py", "gateway.services.code_execution.container_sweeper"),
+    ("gateway/main.py", "gateway.services.tenancy.org_provider_key_service"),
+    ("gateway/main.py", "gateway.services.tenancy.organization_guardrail_runner"),
+    ("gateway/services/budgets/_member_policies.py", "gateway.services.tenancy.authorization"),
+    ("gateway/services/budgets/_member_policies.py", "gateway.services.tenancy.organization_service"),
+    ("gateway/services/budgets/_organization_surface.py", "gateway.services.tenancy.organization_service"),
+    ("gateway/services/budgets/_scopes.py", "gateway.services.tenancy.organization_service"),
+    ("gateway/services/budgets/_service.py", "gateway.services.tenancy.organization_service"),
+    ("gateway/services/merged_catalog_service.py", "gateway.services.tenancy.deployment_user_service"),
+    ("gateway/services/merged_catalog_service.py", "gateway.services.tenancy.org_provider_key_service"),
+    ("gateway/services/merged_catalog_service.py", "gateway.services.tenancy.organization_model_access"),
+    ("gateway/services/organization_pricing_service.py", "gateway.services.tenancy.deployment_user_service"),
+    ("gateway/services/organization_pricing_service.py", "gateway.services.tenancy.org_provider_key_service"),
+    ("gateway/services/organization_pricing_service.py", "gateway.services.tenancy.organization_service"),
+    ("gateway/services/overview/overview_service.py", "gateway.services.tenancy.deployment_user_service"),
+    ("gateway/services/overview/overview_service.py", "gateway.services.tenancy.organization_service"),
+    ("gateway/services/overview/overview_service.py", "gateway.services.tenancy.workspace_service"),
+    ("gateway/services/playground_service.py", "gateway.services.tenancy.authorization"),
+    ("gateway/services/pricing_init_service.py", "gateway.services.routing.backends"),
+    ("gateway/services/pricing_init_service.py", "gateway.services.routing.knn"),
+    ("gateway/services/provider_kwargs.py", "gateway.services.tenancy.org_provider_key_service"),
+    ("gateway/services/providers/_org_provider_model_service.py", "gateway.services.tenancy.org_provider_key_service"),
+    ("gateway/services/providers/_org_provider_model_service.py", "gateway.services.tenancy.organization_service"),
+    ("gateway/services/routing/compiler.py", "gateway.services.tenancy.org_provider_key_service"),
+    ("gateway/services/selector_index_service.py", "gateway.services.tenancy.organization_model_access"),
+    ("gateway/services/tools/_web_access.py", "gateway.services.tenancy.workspace_web_search_service"),
+    ("gateway/services/workspace_scope.py", "gateway.services.tenancy.provisioning_service"),
+)
+
+
+def _package_members(package_root: Path) -> set[str]:
+    """Return the name of each module and subpackage directly inside a package, spelled as it is on disk.
+
+    NOTE: A path test on a case-insensitive file system would match a class such as Mailer to mailer.py.
+    """
+    return {
+        entry.stem if entry.is_file() else entry.name
+        for entry in package_root.iterdir()
+        if (entry.suffix == ".py" and entry.name != "__init__.py") or (entry / "__init__.py").is_file()
+    }
+
+
+def _foreign_service_member(module: str, relative_path: str, members: dict[str, set[str]]) -> str | None:
+    """Return the module directly below another domain's service package root that a module lies in, if any."""
+    domain = _imported_domain(module, SERVICE_SCOPE, members)
+    if domain is None or relative_path.startswith(f"{SERVICE_SCOPE}/{domain}/"):
+        return None
+    package_root = f"{SERVICE_SCOPE.replace('/', '.')}.{domain}"
+    member = module.removeprefix(f"{package_root}.").split(".")[0]
+    return f"{package_root}.{member}" if member in members[domain] else None
+
+
+def check_service_package_imports(src_root: Path) -> list[str]:
+    """Check that code outside a domain service package imports only the package root."""
+    members = {
+        domain: _package_members(src_root / SERVICE_SCOPE / domain)
+        for domain in _domain_packages(src_root, SERVICE_SCOPE)
+    }
+    findings: list[tuple[str, int, str]] = []
+    for relative_path, tree in _parsed_modules(src_root, "gateway"):
+        for line, modules in _import_statements(tree, src_root / relative_path, src_root):
+            targets = {
+                target
+                for module in modules
+                if (target := _foreign_service_member(module, relative_path, members)) is not None
+            }
+            findings.extend((relative_path, line, target) for target in sorted(targets))
+    return _baseline_violations(
+        sorted(findings),
+        SERVICE_PACKAGE_IMPORT_BASELINE,
+        "code outside a domain imports what its service package root exports",
+        "service package import",
+    )
+
+
 def main() -> int:
     """Run the architecture checks over the gateway package, the light CLI and the OSS test suite."""
     # All must exist: silently skipping one would let its rules (including
@@ -1064,6 +1215,7 @@ def main() -> int:
     unit_of_work_violations = check_unit_of_work_construction(SRC_ROOT)
     domain_name_violations = check_domain_names(SRC_ROOT, REPO_ROOT / DOMAINS_DOC)
     repository_import_violations = check_repository_imports(SRC_ROOT)
+    service_package_import_violations = check_service_package_imports(SRC_ROOT)
 
     if import_violations:
         print("❌ Architecture violations found:\n")
@@ -1120,6 +1272,12 @@ def main() -> int:
             print(f"  {violation}")
         print(f"\nTotal repository import violations: {len(repository_import_violations)}")
 
+    if service_package_import_violations:
+        print("\n❌ Service package import violations:\n")
+        for violation in service_package_import_violations:
+            print(f"  {violation}")
+        print(f"\nTotal service package import violations: {len(service_package_import_violations)}")
+
     if (
         import_violations
         or naming_violations
@@ -1130,6 +1288,7 @@ def main() -> int:
         or flat_module_violations
         or domain_name_violations
         or repository_import_violations
+        or service_package_import_violations
     ):
         print("\n💡 See ARCHITECTURE.md for the intended layering")
         return 1
